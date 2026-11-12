@@ -20,6 +20,24 @@ namespace My_串口调试助手
             comboBox_校验位.SelectedIndex = 0;
             comboBox_编码.SelectedIndex = 0;
             comboBox_波特率.SelectedIndex = 0;
+            numericUpDown1.Maximum = 60000;   // 默认上限只有 100，不改的话设 500 会直接抛异常
+            numericUpDown1.Minimum = 10;      // 原来默认 0，Interval=0 会导致定时发送疯狂刷
+            numericUpDown1.Value = 500;
+            // DTR / RTS 两个复选框以前没有事件，勾了没反应，这里补上
+            checkBox1.CheckedChanged += (s, e) => { if (serialPort.IsOpen) serialPort.DtrEnable = checkBox1.Checked; };
+            checkBox2.CheckedChanged += (s, e) => { if (serialPort.IsOpen) serialPort.RtsEnable = checkBox2.Checked; };
+            RefreshPortList();             // 启动即枚举串口，不用再手动点"刷新"
+        }
+
+        // 按下拉框选择返回编码；GB2312 依赖 Program.Main 里注册的 CodePagesEncodingProvider
+        private Encoding GetEncoding()
+        {
+            switch (comboBox_编码.Text)
+            {
+                case "GB2312": return Encoding.GetEncoding("GB2312");
+                case "ASCII": return Encoding.ASCII;
+                default: return Encoding.UTF8;
+            }
         }
         private void RefreshPortList()
         {
@@ -73,7 +91,7 @@ namespace My_串口调试助手
                     checkBox_定时发送.Checked = false;
                     return;
                 }
-                if(textBox1.Text != "")
+                if(string.IsNullOrEmpty(textBox1.Text))
                 {
                     MessageBox.Show("发送数据不能为空！", "提示");
                     checkBox_定时发送.Checked = false;
@@ -81,28 +99,26 @@ namespace My_串口调试助手
                 }
                 sendTime.Interval = (int)numericUpDown1.Value; //设置定时器间隔
                 sendTime.Start();
-                button_发送.Enabled = false;//禁用发送按钮,防止冲突
             }
             
             else
             {
                 sendTime.Stop();
-                button_发送.Enabled = true;
             }
         }
         // 【新增】定时器触发事件
-        private void SendTimer_Tick(object sender, EventArgs e)
+        private void SendTimer_Tick(object? sender, EventArgs e)
         {
             // 防呆：如果串口意外断开，停止定时器
             if (!serialPort.IsOpen)
             {
                 sendTime.Stop();
                 checkBox_定时发送.Checked = false;
-                button_发送.Enabled = true;
                 return;
             }
 
             // 直接触发发送按钮的点击事件，复用发送逻辑
+            // 注意：这里不能再把 button_发送.Enabled 设成 false，禁用后 PerformClick 不会执行，定时发送就发不出去了
             button_发送.PerformClick();
         }
 
@@ -236,25 +252,7 @@ namespace My_串口调试助手
                         sendText += "\r\n";
                     }
                     // 4. 决定用哪种编码发送数据
-                    Encoding encoding = Encoding.UTF8;
-                    switch (comboBox_编码.Text)
-                    {
-                        case "UTF-8":
-                            {
-                                encoding = Encoding.UTF8;
-                                break;
-                            }
-                        case "GB2312":
-                            {
-                                encoding = Encoding.GetEncoding("GB2312");
-                                break;
-                            }
-                        case "ASCII":
-                            {
-                                encoding = Encoding.ASCII;
-                                break;
-                            }
-                    }
+                    Encoding encoding = GetEncoding();
                     // 5. 把字符串转换成字节数组（串口只能发字节）
                     byte[] sendBytes = encoding.GetBytes(sendText);
                     // 发送数据
@@ -277,102 +275,70 @@ namespace My_串口调试助手
         {
             try
             {
-                // 1. 获取接收缓冲区有多少字节
+                // 1. 取接收缓冲区里的字节（ReadExisting 用的是 SerialPort.Encoding，不是下拉框选的，所以自己读字节）
                 int bytesToRead = serialPort.BytesToRead;
                 if (bytesToRead == 0)
                 {
-                    return; // 没有数据就直接返回
+                    return;
                 }
-                // 2. 创建一个字节数组来存储接收到的数据
                 byte[] receivedBytes = new byte[bytesToRead];
-                serialPort.Read(receivedBytes, 0, bytesToRead);//读数据
-                // 3. // 3. 根据下拉框选择的编码，把字节翻译成文字
-                Encoding encoding = Encoding.UTF8;
-                rxCount += receivedBytes.Length;
-                toolStripStatusLabel2.Text = $"RX:{rxCount}位";
-                this.Invoke(new Action(() =>
+                serialPort.Read(receivedBytes, 0, bytesToRead);
+
+                if (!IsHandleCreated || IsDisposed)   // 窗口正在关闭，别再往 UI 线程扔东西
                 {
-                    if (checkBox5.Checked)
+                    return;
+                }
+
+                // 2. 所有 UI 操作（包括计数标签）统一回到 UI 线程，否则 VS 里调试会报"线程间操作无效"
+                this.BeginInvoke(new Action(() =>
+                {
+                    rxCount += receivedBytes.Length;
+                    toolStripStatusLabel2.Text = $"RX:{rxCount}字节";
+
+                    if (checkBox5.Checked)   // 暂停
                     {
                         return;
                     }
-                    if (checkBox3.Checked)
+
+                    if (checkBox4.Checked)   // 时间戳：每收到一批打一个
                     {
-                        // ================= HEX 显示模式 =================
-
-                        // 把字节数组直接转成十六进制字符串，并把 "-" 替换成空格
-                        string hexString = BitConverter.ToString(receivedBytes).Replace("-", " ");
-
-                        // 处理时间戳
-                        if (checkBox4.Checked)
-                        {
-                            richTextBox1.SelectionColor = Color.Red;
-                            richTextBox1.AppendText("[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] ");
-                            richTextBox1.SelectionColor = Color.Black;
-                        }
-
-                        // 打印 HEX 数据并换行
-                        richTextBox1.AppendText(hexString + "\r\n");
+                        richTextBox1.SelectionColor = Color.Red;
+                        richTextBox1.AppendText("[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] ");
                     }
-                    else
+                    richTextBox1.SelectionColor = Color.Black;
+
+                    if (checkBox3.Checked)   // HEX 显示
                     {
-                        switch (comboBox_编码.Text)
-                        {
-                            case "UTF-8":
-                                {
-                                    encoding = Encoding.UTF8;
-                                    break;
-                                }
-                            case "GB2312":
-                                {
-                                    encoding = Encoding.GetEncoding("GB2312");
-                                    break;
-                                }
-                            case "ASCII":
-                                {
-                                    encoding = Encoding.ASCII;
-                                    break;
-                                }
-                        }
-                        string receivedText = encoding.GetString(receivedBytes);
-                        //清洗数据
-                        // receivedText = receivedText.Replace("\r", "").Replace("\n", "").Replace("\0", "");
-                        //把接收到的字符进行以"\r\n"拆分
-                        string[] lines = receivedText.Split(new string[] { "\n" }, StringSplitOptions.RemoveEmptyEntries);
-                        if (lines.Length > 0)
-                        {
-                            foreach (string line in lines)
-                            {
-                                if (checkBox4.Checked)
-                                {
-                                    // 1. 把光标颜色设为灰色，打印时间戳
-                                    richTextBox1.SelectionColor = Color.Red;
-                                    richTextBox1.AppendText("[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] ");
-
-                                    // 2. 把光标颜色改回黑色，打印数据
-                                    richTextBox1.SelectionColor = Color.Black;
-                                    richTextBox1.AppendText(line.Trim() + "\r\n");
-                                }
-                                else
-                                {
-                                    // 没勾选，直接黑色打印
-                                    richTextBox1.SelectionColor = Color.Black;
-                                    richTextBox1.AppendText(line.Trim() + "\r\n");
-                                }
-
-
-                            }
-                            richTextBox1.ScrollToCaret();
-                        }
+                        richTextBox1.AppendText(BitConverter.ToString(receivedBytes).Replace("-", " ") + "\r\n");
                     }
-
-     
+                    else                     // 文本原样显示：不拆行、不 Trim，收到的什么就看到什么
+                    {
+                        richTextBox1.AppendText(GetEncoding().GetString(receivedBytes));
+                    }
+                    richTextBox1.ScrollToCaret();
                 }));
             }
             catch (Exception ex)
             {
-                MessageBox.Show("接收数据时发生错误：" + ex.Message, "错误");
+                // 不要在串口线程上弹模态框，否则异常一来接收就卡死
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    BeginInvoke(new Action(() => richTextBox1.AppendText("[接收异常] " + ex.Message + "\r\n")));
+                }
             }
+        }
+
+        // 关窗时把串口和定时器一起收掉，否则端口要等进程退出才释放
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            sendTime.Stop();
+            serialPort.DataReceived -= SerialPort_DataReceived;
+            if (serialPort.IsOpen)
+            {
+                serialPort.Close();
+            }
+            serialPort.Dispose();
+            base.OnFormClosing(e);
         }
 
         private void checkBox_追加换行_CheckedChanged(object sender, EventArgs e)

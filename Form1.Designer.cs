@@ -1,4 +1,4 @@
-﻿
+
 
 namespace My_串口调试助手
 {
@@ -30,7 +30,6 @@ namespace My_串口调试助手
         /// </summary>
         private void InitializeComponent()
         {
-            CheckBox checkBox_定时发送;
             label2 = new Label();
             label1 = new Label();
             label3 = new Label();
